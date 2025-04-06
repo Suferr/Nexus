@@ -1,6 +1,6 @@
 --[[
 	NexusUI - Single File Roblox UI Library
-	Version: 0.2.0 (Single File)
+	Version: 0.2.1 (Single File - Improved Drag)
 
 	Place this ModuleScript in ReplicatedStorage (or elsewhere accessible)
 	and require it from a LocalScript.
@@ -74,7 +74,7 @@
 ]]
 
 local NexusUI = {}
-NexusUI.Version = "0.2.0"
+NexusUI.Version = "0.2.1" -- Updated version number
 
 -- Roblox Services
 local Players = game:GetService("Players")
@@ -208,6 +208,7 @@ function Dragger.Enable(guiObject, dragHandle)
 						lastInputPosition = changedInput.Position -- Update last position
 					end
 				end)
+				table.insert(connections, inputChangedConnection) -- Track this connection for global cleanup
 
 				-- Ensure dragging stops if input ends while connected
 				local inputChangedEndConnection
@@ -224,7 +225,8 @@ function Dragger.Enable(guiObject, dragHandle)
 						if inputChangedEndConnection then inputChangedEndConnection:Disconnect() end -- Disconnect self
 					end
 				end)
-				table.insert(connections, inputChangedEndConnection) -- Add this temporary connection for cleanup
+				-- Don't add inputChangedEndConnection to the main connections table
+				-- as it disconnects itself and is tied to the specific input object lifecycle.
 			end
 		end
 	end
@@ -235,7 +237,8 @@ function Dragger.Enable(guiObject, dragHandle)
 			if dragging then -- Only act if we were actually dragging
 				dragging = false
 				if inputChangedConnection then
-					inputChangedConnection:Disconnect()
+					-- We might have already disconnected in input.Changed, check again
+					pcall(function() inputChangedConnection:Disconnect() end)
 					inputChangedConnection = nil
 				end
 				-- Re-enable selection if needed
@@ -245,43 +248,12 @@ function Dragger.Enable(guiObject, dragHandle)
 		end
 	end
 
-	-- Connect the primary Begoan and Ended events
+	-- Connect the primary Began and Ended events
 	table.insert(connections, dragHandle.InputBegan:Connect(inputBegan))
 	table.insert(connections, UserInputService.InputEnded:Connect(inputEnded)) -- Use InputEnded on UserInputService for more robust end detection
 
 end
 
-	local function inputEnded(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
-		end
-	end
-
-	local function inputChanged(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-			if dragging and dragStart then
-				local delta = input.Position - dragStart
-				local newPos = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
-					startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-
-				-- Boundary checks (simple version)
-				local viewportSize = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1024, 768)
-				local absoluteSize = guiObject.AbsoluteSize
-				newPos = UDim2.new(
-					newPos.X.Scale, math.clamp(newPos.X.Offset, 0, viewportSize.X - absoluteSize.X),
-					newPos.Y.Scale, math.clamp(newPos.Y.Offset, 0, viewportSize.Y - absoluteSize.Y)
-				)
-
-				guiObject.Position = newPos
-			end
-		end
-	end
-
-	table.insert(connections, dragHandle.InputBegan:Connect(inputBegan))
-	table.insert(connections, dragHandle.InputEnded:Connect(inputEnded))
-	table.insert(connections, UserInputService.InputChanged:Connect(inputChanged))
-
-end
 
 --[[----------------------------------------------------------------------------
 	Core UI Classes / Prototypes (Integrated)
@@ -304,7 +276,7 @@ function ElementBase.new()
 end
 function ElementBase:Destroy()
 	if self.Instance then
-		self.Instance:Destroy()
+		pcall(function() self.Instance:Destroy() end) -- Wrap destroy in pcall
 		self.Instance = nil
 	end
 	-- Any specific cleanup for the element would go in overrides of this method
@@ -328,7 +300,7 @@ function Window.new(screenGui, config, theme)
 		Name = "NexusWindow",
 		Size = config.Size,
 		Position = UDim2.fromOffset(100, 100), -- Default position, can be overridden
-		AnchorPoint = Vector2.new(0, 0),
+		AnchorPoint = Vector2.new(0, 0), -- Keep AnchorPoint at 0,0 for easier drag calculations initially
 		BackgroundColor3 = self.Theme.WindowBackground,
 		BorderSizePixel = 1,
 		BorderColor3 = self.Theme.Border,
@@ -345,6 +317,7 @@ function Window.new(screenGui, config, theme)
 		BackgroundColor3 = self.Theme.TitleBar,
 		BorderSizePixel = 0,
 		Parent = self.Instance,
+		ZIndex = 2, -- Ensure TitleBar is above content slightly if needed overlap occurs
 	})
 
 	self.TitleLabel = Create("TextLabel", {
@@ -359,6 +332,7 @@ function Window.new(screenGui, config, theme)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Center,
 		Parent = self.TitleBar,
+		ZIndex = 3, -- Above TitleBar background
 	})
 
 	-- Main Content Area Container
@@ -384,6 +358,9 @@ function Window.new(screenGui, config, theme)
 		Parent = self.TabList,
 		SortOrder = Enum.SortOrder.LayoutOrder,
 		Padding = UDim.new(0, 0), -- No padding between tab buttons
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Top,
 	})
 
 	-- Tab Content Area (Right Side)
@@ -399,6 +376,7 @@ function Window.new(screenGui, config, theme)
 
 	-- Make Draggable (if enabled)
 	if config.Draggable ~= false then
+		-- Pass the main window instance and the title bar as the handle
 		Dragger.Enable(self.Instance, self.TitleBar)
 	end
 
@@ -455,7 +433,9 @@ function Window:SetActiveTab(tabToActivate)
 
 	-- Deactivate previous tab
 	if self.ActiveTab then
-		self.ActiveTab.ContainerFrame.Visible = false
+		if self.ActiveTab.ContainerFrame then -- Check if frame exists
+			self.ActiveTab.ContainerFrame.Visible = false
+		end
 		local oldButton = self.TabButtons[self.ActiveTab]
 		if oldButton then
 			oldButton.BackgroundColor3 = self.Theme.TabButtonInactive
@@ -465,7 +445,9 @@ function Window:SetActiveTab(tabToActivate)
 
 	-- Activate new tab
 	self.ActiveTab = tabToActivate
-	self.ActiveTab.ContainerFrame.Visible = true
+	if self.ActiveTab.ContainerFrame then -- Check if frame exists
+		self.ActiveTab.ContainerFrame.Visible = true
+	end
 	local newButton = self.TabButtons[self.ActiveTab]
 	if newButton then
 		newButton.BackgroundColor3 = self.Theme.TabButtonActive
@@ -474,20 +456,8 @@ function Window:SetActiveTab(tabToActivate)
 end
 
 function Window:Destroy()
-	CleanupConnections() -- Disconnect all events first
-	if self.ScreenGui then
-		self.ScreenGui:Destroy()
-		self.ScreenGui = nil
-	end
-	currentWindowInstance = nil
-	-- Destroy tabs and their elements (optional, as ScreenGui destroy handles it, but good practice)
-	for _, tab in ipairs(self.Tabs) do
-		tab:Destroy()
-	end
-	self.Tabs = {}
-	self.TabButtons = {}
-	self.ActiveTab = nil
-	print("NexusUI Window Destroyed")
+	-- Call the global destroy function which handles cleanup
+	NexusUI:Destroy()
 end
 
 
@@ -510,10 +480,12 @@ function Tab.new(window, config)
 		BorderSizePixel = 0,
 		Parent = self.Window.TabContent,
 		Visible = false, -- Initially hidden
-		CanvasSize = UDim2.new(0, 0, 0, 0), -- Auto-managed by UIListLayout
+		CanvasSize = UDim2.new(0, 0, 0, 0), -- Let UIListLayout manage Y size
 		ScrollBarThickness = 6,
+		ScrollBarImageColor3 = self.Theme.AccentDark,
 		ScrollingDirection = Enum.ScrollingDirection.Y,
 		CanvasPosition = Vector2.zero,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y, -- Automatically adjust canvas based on content
 	})
 
 	self.Layout = Create("UIListLayout", {
@@ -540,21 +512,21 @@ end
 function Tab:_AddElement(elementInstance, layoutOrder)
 	elementInstance.LayoutOrder = layoutOrder or (#self.Elements + 1)
 	elementInstance.Parent = self.ContainerFrame
-	-- No need to manually adjust CanvasSize if UIListLayout is managing it
+	-- AutomaticCanvasSize handles canvas size now
 end
 
 function Tab:Destroy()
 	-- Destroy elements associated with this tab
 	for _, element in ipairs(self.Elements) do
-		if element.Destroy then -- Check if element has a destroy method
-			element:Destroy()
-		elseif element.Instance and element.Instance:IsA("GuiObject") then
-			element.Instance:Destroy() -- Fallback
+		if element and element.Destroy then -- Check if element exists and has a destroy method
+			pcall(element.Destroy, element) -- Call destroy safely
+		elseif element and element.Instance and element.Instance.Parent then -- Check element/instance/parent exist
+			pcall(element.Instance.Destroy, element.Instance) -- Fallback destroy
 		end
 	end
 	self.Elements = {}
-	if self.ContainerFrame then
-		self.ContainerFrame:Destroy()
+	if self.ContainerFrame and self.ContainerFrame.Parent then -- Check exists and parented
+		pcall(self.ContainerFrame.Destroy, self.ContainerFrame)
 		self.ContainerFrame = nil
 	end
 end
@@ -611,7 +583,7 @@ function Label.new(container, config)
 
 	self.Instance = Create("TextLabel", {
 		Name = config.Name or "NexusLabel",
-		Size = UDim2.new(1, -PADDING.Offset * 2, 0, config.Height or self.Theme.TextSize + 4), -- Auto-height based on text size
+		Size = UDim2.new(1, -PADDING.Offset * 2, 0, config.Height or self.Theme.TextSize + 4), -- Base height
 		Position = UDim2.new(0, PADDING.Offset, 0, 0), -- Position managed by Layout
 		BackgroundTransparency = 1,
 		Font = self.Theme.Font,
@@ -620,7 +592,7 @@ function Label.new(container, config)
 		Text = config.Text or "Label",
 		TextWrapped = config.Wrap or true,
 		TextXAlignment = config.Align or Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Center,
+		TextYAlignment = Enum.TextYAlignment.Top, -- Usually better with AutomaticSize
 		AutomaticSize = Enum.AutomaticSize.Y, -- Allow label to grow vertically if wrapped
 	})
 	-- Add padding inside the label itself if needed, or rely on ListLayout padding
@@ -657,25 +629,25 @@ function Button.new(container, config)
 		pcall(self.Callback) -- Wrap callback in pcall for safety
 	end))
 	table.insert(connections, self.Instance.MouseEnter:Connect(function()
-		self.Instance.BackgroundColor3 = self.Theme.ButtonHover
+		TweenService:Create(self.Instance, TweenInfo.new(0.1), { BackgroundColor3 = self.Theme.ButtonHover }):Play()
 	end))
 	table.insert(connections, self.Instance.MouseLeave:Connect(function()
-		self.Instance.BackgroundColor3 = self.Theme.Button
+		TweenService:Create(self.Instance, TweenInfo.new(0.1), { BackgroundColor3 = self.Theme.Button }):Play()
 	end))
 	table.insert(connections, self.Instance.MouseButton1Down:Connect(function()
-		self.Instance.BackgroundColor3 = self.Theme.ButtonPressed
+		TweenService:Create(self.Instance, TweenInfo.new(0.05), { BackgroundColor3 = self.Theme.ButtonPressed }):Play()
 	end))
 	table.insert(connections, self.Instance.MouseButton1Up:Connect(function()
 		-- Check if mouse is still over the button on release
 		local mousePos = UserInputService:GetMouseLocation()
 		local btnPos = self.Instance.AbsolutePosition
 		local btnSize = self.Instance.AbsoluteSize
+		local targetColor = self.Theme.Button
 		if mousePos.X >= btnPos.X and mousePos.X <= btnPos.X + btnSize.X and
 		   mousePos.Y >= btnPos.Y and mousePos.Y <= btnPos.Y + btnSize.Y then
-			self.Instance.BackgroundColor3 = self.Theme.ButtonHover
-		else
-			self.Instance.BackgroundColor3 = self.Theme.Button
+			targetColor = self.Theme.ButtonHover
 		end
+		TweenService:Create(self.Instance, TweenInfo.new(0.1), { BackgroundColor3 = targetColor }):Play()
 	end))
 
 	return self
@@ -703,7 +675,7 @@ function Toggle.new(container, config)
 	-- Label for the toggle
 	self.Label = Create("TextLabel", {
 		Name = "ToggleLabel",
-		Size = UDim2.new(0.7, -5, 1, 0), -- Take up most space, leave room for switch
+		Size = UDim2.new(1, -50, 1, 0), -- Adjusted size to leave space for switch+padding
 		Position = UDim2.new(0, 0, 0, 0),
 		BackgroundTransparency = 1,
 		Font = self.Theme.Font,
@@ -723,7 +695,7 @@ function Toggle.new(container, config)
 	self.Switch = Create("Frame", {
 		Name = "SwitchBackground",
 		Size = UDim2.fromOffset(switchWidth, switchHeight),
-		Position = UDim2.new(1, -switchWidth, 0.5, 0), -- Position right, centered vertically
+		Position = UDim2.new(1, -PADDING.Offset, 0.5, 0), -- Position right, centered vertically
 		AnchorPoint = Vector2.new(1, 0.5),
 		BackgroundColor3 = self.Theme.ToggleBackground,
 		BorderSizePixel = 0,
@@ -771,17 +743,22 @@ function Toggle:_UpdateVisuals(animate)
 
 	local targetPos
 	local targetColor
+	local switchHeight = self.Switch.AbsoluteSize.Y -- Use AbsoluteSize for accuracy
+	local knobSize = self.Knob.AbsoluteSize.Y
+
 	if self.State then
-		targetPos = UDim2.new(1, -(self.Switch.AbsoluteSize.Y - self.Knob.AbsoluteSize.Y)/2, 0.5, 0) -- Right pos
+		targetPos = UDim2.new(1, -(switchHeight - knobSize)/2 - self.Switch.AbsoluteSize.X * (1-1), 0.5, 0) -- Right pos relative to switch width
 		targetColor = self.Theme.ToggleKnobOn
 	else
-		targetPos = UDim2.new(0, (self.Switch.AbsoluteSize.Y - self.Knob.AbsoluteSize.Y)/2, 0.5, 0) -- Left pos
+		targetPos = UDim2.new(0, (switchHeight - knobSize)/2, 0.5, 0) -- Left pos relative to switch width
 		targetColor = self.Theme.ToggleKnobOff
 	end
 
+
 	if animate then
 		local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-		TweenService:Create(self.Knob, tweenInfo, { Position = targetPos, BackgroundColor3 = targetColor }):Play()
+		local knobTween = TweenService:Create(self.Knob, tweenInfo, { Position = targetPos, BackgroundColor3 = targetColor })
+		knobTween:Play()
 	else
 		self.Knob.Position = targetPos
 		self.Knob.BackgroundColor3 = targetColor
@@ -899,17 +876,19 @@ function Slider.new(container, config)
 		Parent = self.Track,
 		ZIndex = 2,
 	})
-	-- Knob (optional visual element, can be complex to drag) - Simplified for now
+	-- Optional Knob Visual
+	-- self.KnobVisual = Create("Frame", { ... ZIndex = 3 ...})
+
 	-- Draggable Area (covers the track for interaction)
 	self.DraggerArea = Create("TextButton", { -- Use TextButton for input events
 		Name = "DraggerArea",
-		Size = UDim2.new(1, 0, 1.5, 0), -- Make slightly taller than track for easier clicking
+		Size = UDim2.new(1, 0, 2.5, 0), -- Make taller than track for easier clicking/dragging vertically
 		Position = UDim2.new(0, 0, 0.5, 0),
 		AnchorPoint = Vector2.new(0, 0.5),
 		BackgroundTransparency = 1, -- Invisible
 		Text = "",
 		Parent = self.BottomRow,
-		ZIndex = 3,
+		ZIndex = 3, -- Above track/fill
 	})
 
 	-- Set initial value and text
@@ -917,10 +896,14 @@ function Slider.new(container, config)
 
 	-- Interactions
 	local isDragging = false
+	local dragInputChangedConn = nil -- Connection specific to slider drag
 
 	local function updateValueFromInput(input)
 		local trackAbsPos = self.Track.AbsolutePosition
 		local trackAbsSize = self.Track.AbsoluteSize
+		-- Ensure trackAbsSize.X is not zero to prevent division by zero
+		if trackAbsSize.X == 0 then return end
+
 		local mouseX = input.Position.X
 
 		local relativeX = math.clamp(mouseX - trackAbsPos.X, 0, trackAbsSize.X)
@@ -942,26 +925,40 @@ function Slider.new(container, config)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			isDragging = true
 			updateValueFromInput(input) -- Update immediately on click
-			input.Changed:Connect(function()
+
+			-- Connect InputChanged only during drag
+			if dragInputChangedConn then dragInputChangedConn:Disconnect() end -- Disconnect old if any
+			dragInputChangedConn = UserInputService.InputChanged:Connect(function(changedInput)
+				if not isDragging then return end
+				if changedInput.UserInputType == Enum.UserInputType.MouseMovement or changedInput.UserInputType == Enum.UserInputType.Touch then
+					updateValueFromInput(changedInput)
+				end
+			end)
+			-- No need to add dragInputChangedConn to main connections, managed locally
+
+			-- Disconnect drag listener when input ends
+			local inputChangedEndConn
+			inputChangedEndConn = input.Changed:Connect(function()
 				if input.UserInputState == Enum.UserInputState.End then
 					isDragging = false
+					if dragInputChangedConn then dragInputChangedConn:Disconnect() dragInputChangedConn = nil end
+					if inputChangedEndConn then inputChangedEndConn:Disconnect() end
 				end
 			end)
 		end
 	end))
 
-	table.insert(connections, self.DraggerArea.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+	-- Use InputEnded on UserInputService as a fallback / definite end
+	table.insert(connections, UserInputService.InputEnded:Connect(function(input)
+		if isDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
 			isDragging = false
+			if dragInputChangedConn then
+				pcall(function() dragInputChangedConn:Disconnect() end) -- Disconnect safely
+				dragInputChangedConn = nil
+			end
 		end
 	end))
 
-	-- Use InputChanged for smoother dragging (connect outside InputBegan)
-	table.insert(connections, UserInputService.InputChanged:Connect(function(input)
-		if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			updateValueFromInput(input)
-		end
-	end))
 
 	return self
 end
@@ -970,6 +967,8 @@ function Slider:SetValue(newValue, triggerCallback)
 	newValue = math.clamp(newValue, self.Min, self.Max)
 	if self.Increment > 0 then -- Ensure it aligns with increment if set externally
 		newValue = math.floor(newValue / self.Increment + 0.5) * self.Increment
+		-- Re-clamp after rounding, especially important if Min/Max aren't multiples of Increment
+		newValue = math.clamp(newValue, self.Min, self.Max)
 	end
 
 	if self.Value == newValue then return end -- No change
@@ -977,11 +976,34 @@ function Slider:SetValue(newValue, triggerCallback)
 	self.Value = newValue
 
 	-- Update Visuals
-	local percentage = (self.Value - self.Min) / (self.Max - self.Min)
-	if (self.Max - self.Min) == 0 then percentage = 0 end -- Avoid division by zero
+	local range = self.Max - self.Min
+	local percentage = 0
+	if range ~= 0 then -- Avoid division by zero
+		percentage = (self.Value - self.Min) / range
+	end
 
-	self.Fill.Size = UDim2.new(percentage, 0, 1, 0)
-	self.ValueLabel.Text = string.format("%.*f%s", (math.floor(self.Increment) == self.Increment and self.Increment ~= 0) and 0 or 2, self.Value, self.Unit) -- Show decimals only if increment allows
+	-- Use TweenService for smoother fill animation (optional)
+	local tweenInfo = TweenInfo.new(0.05) -- Quick tween
+	TweenService:Create(self.Fill, tweenInfo, { Size = UDim2.new(percentage, 0, 1, 0) }):Play()
+
+	-- Also update optional Knob position if implemented
+	-- if self.KnobVisual then
+	--    self.KnobVisual.Position = UDim2.new(percentage, -self.KnobVisual.AbsoluteSize.X * 0.5, 0.5, 0)
+	-- end
+
+	-- Format value string: show decimals only if increment is not a whole number or is zero
+	local numDecimalPlaces = 0
+	if self.Increment ~= 0 and math.floor(self.Increment) ~= self.Increment then
+		-- Crude way to find decimal places, better methods exist
+		local s = string.format("%f", self.Increment)
+		local dotPos = s:find("%.")
+		if dotPos then numDecimalPlaces = #s - dotPos end
+		numDecimalPlaces = math.max(numDecimalPlaces, 2) -- Show at least 2 if increment has decimals
+	end
+	-- Special case: If range is small and increment allows decimals, show more precision
+	if range <= 1 and self.Increment < 1 and self.Increment ~= 0 then numDecimalPlaces = 2 end
+
+	self.ValueLabel.Text = string.format("%."..numDecimalPlaces.."f%s", self.Value, self.Unit)
 
 	if triggerCallback == nil or triggerCallback == true then
 		pcall(self.Callback, self.Value) -- Trigger callback
@@ -1012,50 +1034,53 @@ function Textbox.new(container, config)
 		BorderSizePixel = 1,
 		BorderColor3 = self.Theme.TextboxBorder,
 		Font = self.Theme.Font,
-		TextColor3 = self.Theme.Text, -- Initial color
+		TextColor3 = self.Theme.TextPlaceholder, -- Start with placeholder color if text matches
 		TextSize = self.Theme.TextSize,
 		Text = config.Text or self.PlaceholderText, -- Start with default or placeholder
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Center,
 		PlaceholderText = "", -- Use manual placeholder logic for color
-		PlaceholderColor3 = self.Theme.TextPlaceholder, -- Can't directly use, do it manually
+		-- PlaceholderColor3 = self.Theme.TextPlaceholder, -- Can't directly use, do it manually
 		ClearTextOnFocus = false, -- Handle manually for placeholder logic
 		MultiLine = config.MultiLine or false, -- Optional multiline support
 	})
 	Create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = self.Instance })
 	Create("UIPadding", { PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5), Parent = self.Instance}) -- Inner padding
 
-	-- Placeholder logic
-	if self.Instance.Text == self.PlaceholderText then
+	-- Placeholder logic initial setup
+	local isPlaceholderActive = false -- Track if the displayed text is the placeholder
+	if self.Instance.Text == self.PlaceholderText and self.PlaceholderText ~= "" then
 		self.Instance.TextColor3 = self.Theme.TextPlaceholder
+		isPlaceholderActive = true
 	else
 		self.Instance.TextColor3 = self.Theme.Text
+		isPlaceholderActive = false
 	end
-
-	local hadPlaceholder = self.Instance.Text == self.PlaceholderText
 
 	table.insert(connections, self.Instance.Focused:Connect(function()
 		self.Instance.BorderColor3 = self.Theme.ButtonHover -- Highlight border on focus
-		if self.ClearOnFocus or hadPlaceholder then
-			if self.Instance.Text == self.PlaceholderText then
+		if isPlaceholderActive then
+			if self.ClearOnFocus or self.Instance.Text == self.PlaceholderText then -- Double check text content
 				self.Instance.Text = ""
 				self.Instance.TextColor3 = self.Theme.Text
-				hadPlaceholder = false -- No longer holding placeholder text
+				isPlaceholderActive = false
 			end
 		end
 	end))
 
 	table.insert(connections, self.Instance.FocusLost:Connect(function(enterPressed, inputThatCausedFocusLoss)
 		self.Instance.BorderColor3 = self.Theme.TextboxBorder -- Revert border
-		if self.Instance.Text == "" then
+		if self.Instance.Text == "" and self.PlaceholderText ~= "" then
 			self.Instance.Text = self.PlaceholderText
 			self.Instance.TextColor3 = self.Theme.TextPlaceholder
-			hadPlaceholder = true
+			isPlaceholderActive = true
 		else
+			-- Even if text wasn't empty, ensure correct color if it wasn't placeholder
 			self.Instance.TextColor3 = self.Theme.Text
-			hadPlaceholder = false
+			isPlaceholderActive = false
 		end
 
-		if enterPressed then
+		if enterPressed and not isPlaceholderActive then -- Only callback if enter pressed AND not showing placeholder
 			pcall(self.Callback, self.Instance.Text) -- Trigger callback on enter
 		end
 	end))
@@ -1063,8 +1088,17 @@ function Textbox.new(container, config)
 	-- Optional: Callback on text changed (can be noisy)
 	if config.ChangedCallback then
 		table.insert(connections, self.Instance.Changed:Connect(function(property)
-			if property == "Text" and not hadPlaceholder then -- Only callback if not placeholder
-				pcall(config.ChangedCallback, self.Instance.Text)
+			-- Only callback if the actual value changed and it's not currently a placeholder being displayed
+			if property == "Text" then
+				if self.Instance.Text ~= self.PlaceholderText then
+					isPlaceholderActive = false
+					self.Instance.TextColor3 = self.Theme.Text -- Ensure correct color
+					pcall(config.ChangedCallback, self.Instance.Text)
+				elseif self.Instance.Text == "" then
+					-- If text becomes empty (e.g., backspace all), it might show placeholder later on FocusLost
+					-- We can optionally trigger callback with empty string here if needed.
+					pcall(config.ChangedCallback, "")
+				end
 			end
 		end))
 	end
@@ -1073,17 +1107,27 @@ function Textbox.new(container, config)
 end
 
 function Textbox:SetText(text)
-	self.Instance.Text = text or ""
-	if self.Instance.Text == "" or self.Instance.Text == self.PlaceholderText then
+	text = text or ""
+	self.Instance.Text = text
+	if text == "" and self.PlaceholderText ~= "" then
 		self.Instance.Text = self.PlaceholderText
 		self.Instance.TextColor3 = self.Theme.TextPlaceholder
+		-- isPlaceholderActive should be true here, but FocusLost handles this state usually
+	elseif text == self.PlaceholderText and self.PlaceholderText ~= "" then
+		self.Instance.TextColor3 = self.Theme.TextPlaceholder
+		-- isPlaceholderActive = true
 	else
 		self.Instance.TextColor3 = self.Theme.Text
+		-- isPlaceholderActive = false
+	end
+	-- Manually trigger ChangedCallback if it exists and behavior is desired
+	if self.Config.ChangedCallback then
+		pcall(self.Config.ChangedCallback, self:GetText()) -- Use GetText to handle placeholder logic
 	end
 end
 
 function Textbox:GetText()
-	if self.Instance.Text == self.PlaceholderText then
+	if self.Instance.Text == self.PlaceholderText and self.PlaceholderText ~= "" then
 		return "" -- Return empty if it's just the placeholder
 	end
 	return self.Instance.Text
@@ -1102,24 +1146,41 @@ end
 		* Draggable (boolean): Whether the window can be dragged. (Default: true)
 		* Theme (table): Optional theme table to override defaults.
 		* ParentGui (Instance): Where to parent the ScreenGui. (Default: PlayerGui)
-	@returns Window The main Window object, allowing tab/element creation.
+	@returns Window The main Window object, allowing tab/element creation, or nil if failed.
 **--]]
 function NexusUI:Load(config)
 	config = config or {}
-	local theme = config.Theme or DEFAULT_THEME -- Use provided or default theme
+	local theme = table.clone(DEFAULT_THEME) -- Start with default
+	if config.Theme then -- Merge custom theme over default
+		for k, v in pairs(config.Theme) do
+			theme[k] = v
+		end
+	end
 	local parentGui = config.ParentGui
 
 	-- Determine parent GUI if not provided
 	if not parentGui then
-		local success, playerGui = pcall(function() return Players.LocalPlayer:WaitForChild("PlayerGui") end)
+		local success, playerGui = pcall(function() return Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui") end)
 		if success and playerGui then
 			parentGui = playerGui
 		else
-			-- Fallback or error if PlayerGui is not available (e.g., running on server)
-			warn("NexusUI: Could not find PlayerGui. UI will not be created.")
+			-- More specific warning if LocalPlayer isn't available
+			if not Players.LocalPlayer then
+				warn("NexusUI Error: Cannot access LocalPlayer. Ensure this is run from a LocalScript.")
+				return nil
+			end
+			-- Fallback or error if PlayerGui is not available
+			warn("NexusUI Warning: Could not find PlayerGui for LocalPlayer:", Players.LocalPlayer, ". UI will not be created.")
 			return nil
 		end
 	end
+
+	-- Ensure ParentGui is valid
+	if not (typeof(parentGui) == "Instance" and (parentGui:IsA("ScreenGui") or parentGui:IsA("Folder") or parentGui:IsA("PlayerGui") or parentGui == game:GetService("CoreGui"))) then
+		warn("NexusUI Error: Invalid ParentGui provided. Must be a valid GUI container.")
+		return nil
+	end
+
 
 	-- Destroy previous UI if it exists
 	self:Destroy() -- Use the Destroy method which handles cleanup
@@ -1128,45 +1189,56 @@ function NexusUI:Load(config)
 	local screenGui = Create("ScreenGui", {
 		Name = "NexusUI_ScreenGui_" .. math.random(1000, 9999), -- Unique name
 		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling, -- Or Global if needed
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling, -- Or Global if needed for CoreGui
 		Parent = parentGui,
 		DisplayOrder = 1000, -- Try to render on top
+		Enabled = true,
 	})
 
 	-- Create the Window instance using the integrated class
-	local window = Window.new(screenGui, config, theme)
-	if not window or not window.Instance then -- Check if window creation failed
-		warn("NexusUI: Window creation failed.")
-		screenGui:Destroy()
+	local windowObject = nil
+	local success, result = pcall(function()
+		windowObject = Window.new(screenGui, config, theme)
+	end)
+
+	if not success or not windowObject or not windowObject.Instance then
+		warn("NexusUI Error: Window creation failed.", result)
+		pcall(screenGui.Destroy, screenGui) -- Clean up the ScreenGui if window failed
+		currentWindowInstance = nil -- Ensure global tracker is nil
 		return nil
 	end
 
 	-- Return the window object so the user can add tabs/elements
-	return window
+	return windowObject
 end
 
 --[[**
 	Destroys the currently active NexusUI window and all associated elements/connections.
 **--]]
 function NexusUI:Destroy()
+	-- Disconnect all tracked connections first
+	CleanupConnections()
+
 	if currentWindowInstance and currentWindowInstance.Parent then
-		local screenGui = currentWindowInstance.Parent
-		if screenGui and screenGui:IsA("ScreenGui") and screenGui.Name:match("^NexusUI_ScreenGui_") then
-			-- Perform cleanup *before* destroying instances
-			CleanupConnections()
+		-- Find the ScreenGui parent reliably
+		local screenGui = currentWindowInstance:FindFirstAncestorOfClass("ScreenGui")
+		if screenGui and screenGui.Name:match("^NexusUI_ScreenGui_") then
 			-- Destroy the ScreenGui, which removes everything parented to it
-			screenGui:Destroy()
+			pcall(screenGui.Destroy, screenGui)
 		else
-			-- If parent isn't the expected ScreenGui, just destroy the window frame
-			-- and hope connections get cleaned up okay (less ideal)
-			CleanupConnections()
-			currentWindowInstance:Destroy()
+			-- If parent isn't the expected ScreenGui (shouldn't happen with Load logic),
+			-- just destroy the window frame as a fallback.
+			pcall(currentWindowInstance.Destroy, currentWindowInstance)
 		end
-	else
-		-- If only connections exist without a window, clean them up
-		CleanupConnections()
+	elseif currentWindowInstance then
+		-- If instance exists but no parent (already removed?), try destroying directly.
+		pcall(currentWindowInstance.Destroy, currentWindowInstance)
 	end
+
+	-- Clear state regardless
 	currentWindowInstance = nil
+	-- Note: Child tabs/elements are destroyed when their parent (ScreenGui or Window Frame) is destroyed.
+	-- Manual destruction loops in Window/Tab destroy methods are mostly for internal state cleanup now.
 	print("NexusUI Destroyed")
 end
 
